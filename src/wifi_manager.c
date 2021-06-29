@@ -173,10 +173,16 @@ void wifi_manager_disconnect_async(){
 }
 
 
-void wifi_manager_start(){
-
+void wifi_manager_start(const char * default_ssid, const char * default_pwd){
 	/* disable the default wifi logging */
 	esp_log_level_set("wifi", ESP_LOG_NONE);
+
+	if (default_ssid) {
+		strncpy((char *)wifi_settings.ap_ssid, default_ssid, sizeof(wifi_settings.ap_ssid));
+	}
+	if (default_pwd) {
+		strncpy((char *)wifi_settings.ap_pwd, default_pwd, sizeof(wifi_settings.ap_pwd));
+	}
 
 	/* initialize flash memory */
 	nvs_flash_init();
@@ -209,6 +215,7 @@ void wifi_manager_start(){
 	wifi_manager_shutdown_ap_timer = xTimerCreate( NULL, pdMS_TO_TICKS(WIFI_MANAGER_SHUTDOWN_AP_TIMER), pdFALSE, ( void * ) 0, wifi_manager_timer_shutdown_ap_cb);
 
 	/* start wifi manager task */
+	ESP_LOGI(TAG, "Starting wifi manager task");
 	xTaskCreate(&wifi_manager, "wifi_manager", 4096, NULL, WIFI_MANAGER_TASK_PRIORITY, &task_wifi_manager);
 }
 
@@ -231,6 +238,7 @@ esp_err_t wifi_manager_save_sta_config(){
 
 		esp_err = nvs_open(wifi_manager_nvs_namespace, NVS_READWRITE, &handle);
 		if (esp_err != ESP_OK){
+			ESP_LOGE(TAG, "Error opening NVS for write %d", esp_err);
 			nvs_sync_unlock();
 			return esp_err;
 		}
@@ -320,6 +328,7 @@ bool wifi_manager_fetch_wifi_sta_config(){
 		esp_err = nvs_open(wifi_manager_nvs_namespace, NVS_READONLY, &handle);
 
 		if(esp_err != ESP_OK){
+			ESP_LOGE(TAG, "Error opening NVS %d", esp_err);
 			nvs_sync_unlock();
 			return false;
 		}
@@ -338,6 +347,7 @@ bool wifi_manager_fetch_wifi_sta_config(){
 		sz = sizeof(wifi_manager_config_sta->sta.ssid);
 		esp_err = nvs_get_blob(handle, "ssid", buff, &sz);
 		if(esp_err != ESP_OK){
+			ESP_LOGE(TAG, "Error getting ssid blob");
 			free(buff);
 			nvs_sync_unlock();
 			return false;
@@ -348,6 +358,7 @@ bool wifi_manager_fetch_wifi_sta_config(){
 		sz = sizeof(wifi_manager_config_sta->sta.password);
 		esp_err = nvs_get_blob(handle, "password", buff, &sz);
 		if(esp_err != ESP_OK){
+			ESP_LOGE(TAG, "Error getting password blob");
 			free(buff);
 			nvs_sync_unlock();
 			return false;
@@ -358,6 +369,7 @@ bool wifi_manager_fetch_wifi_sta_config(){
 		sz = sizeof(wifi_settings);
 		esp_err = nvs_get_blob(handle, "settings", buff, &sz);
 		if(esp_err != ESP_OK){
+			ESP_LOGE(TAG, "Error opening settings blob");
 			free(buff);
 			nvs_sync_unlock();
 			return false;
@@ -693,9 +705,9 @@ static void wifi_manager_event_handler(void* arg, esp_event_base_t event_base, i
 		 *   The station kicks off the AP.
 		 * When this event happens, the event task will do nothing, but the application event callback needs to do
 		 * something, e.g., close the socket which is related to this station, etc. */
-		case WIFI_EVENT_AP_STADISCONNECTED:
-			ESP_LOGI(TAG, "WIFI_EVENT_AP_STADISCONNECTED");
-			break;
+		// case WIFI_EVENT_AP_STADISCONNECTED:
+		// 	ESP_LOGI(TAG, "WIFI_EVENT_AP_STADISCONNECTED");
+		// 	break;
 
 		/* This event is disabled by default. The application can enable it via API esp_wifi_set_event_mask().
 		 * When this event is enabled, it will be raised each time the AP receives a probe request. */
@@ -963,7 +975,7 @@ void wifi_manager( void * pvParameters ){
 	ESP_ERROR_CHECK(esp_wifi_start());
 
 	/* start http server */
-	http_app_start(false);
+	http_app_start(true);
 
 	/* wifi scanner config */
 	wifi_scan_config_t scan_config = {
@@ -1058,22 +1070,32 @@ void wifi_manager( void * pvParameters ){
 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 				if( ! (uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT) ){
+					ESP_LOGI(TAG, "Not connected, setting config and connecting");
 					/* update config to latest and attempt connection */
 					ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, wifi_manager_get_wifi_sta_config()));
-
+					ESP_LOGI(TAG, "Called set_wifi_config: %s %s", wifi_manager_get_wifi_sta_config()->sta.ssid, wifi_manager_get_wifi_sta_config()->sta.password);
 					/* if there is a wifi scan in progress abort it first
 					   Calling esp_wifi_scan_stop will trigger a SCAN_DONE event which will reset this bit */
 					if(uxBits & WIFI_MANAGER_SCAN_BIT){
+						ESP_LOGI(TAG, "Stopping scan");
 						esp_wifi_scan_stop();
 					}
-					ESP_ERROR_CHECK(esp_wifi_connect());
+					
+					// Shlomo: not sure why I had to add this. what changed between IDF 4.2 and 4.3? shrug
+					esp_wifi_disconnect();
+					esp_wifi_set_mode(WIFI_MODE_STA);
+					
+					esp_err_t err = esp_wifi_connect();
+					ESP_LOGI(TAG, "Calling WiFi Connect. Ret: %d", err);
+				} else {
+					ESP_LOGI(TAG, "Already connected, doing nothing");
 				}
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
 
 				break;
-
+			
 			case WM_EVENT_STA_DISCONNECTED:
 				;wifi_event_sta_disconnected_t* wifi_event_sta_disconnected = (wifi_event_sta_disconnected_t*)msg.param;
 				ESP_LOGI(TAG, "MESSAGE: EVENT_STA_DISCONNECTED with Reason code: %d", wifi_event_sta_disconnected->reason);
@@ -1244,7 +1266,7 @@ void wifi_manager( void * pvParameters ){
 
 					/* restart HTTP daemon */
 					http_app_stop();
-					http_app_start(false);
+					http_app_start(true);
 
 					/* callback */
 					if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);

@@ -78,4 +78,8 @@ config DEFAULT_AP_BEACON_INTERVAL
     help
 	100ms is the recommended default.
 
+config ESP_TLS_SKIP_SERVER_CERT_VERIFY
+    bool "DO IT"
+    default y
+    
 endmenu
